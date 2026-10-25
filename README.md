@@ -1,171 +1,210 @@
-# Solana Flash Loan with Jupiter Lend & Direct Fixed-MM RFQ Arbitrage
+# Jupiter Lend flash loan → direct RFQ round trip (on-chain quoted)
 
-A complete, production-grade Solana architecture and study suite demonstrating **atomic flash loans via Jupiter Lend**, **direct bilateral RFQ (Request-for-Quote) settlement with fixed Market Makers (MMs)** without third-party aggregator routing, and **localnet testing using cloned mainnet contracts**.
-
----
-
-## Table of Contents
-1. [Core Concepts & Architecture](#core-concepts--architecture)
-   - [Direct RFQ vs Aggregator Routing (No Jupiter RFQ)](#direct-rfq-vs-aggregator-routing-no-jupiter-rfq)
-   - [The Fixed Market Maker (MM) Model](#the-fixed-market-maker-mm-model)
-   - [Jupiter Lend Direct Flash Loan Constraint (`get_stack_height() == 1`)](#jupiter-lend-direct-flash-loan-constraint)
-   - [On-Chain Pre-Quoting Before Flash Loan Borrow](#on-chain-pre-quoting-before-flash-loan-borrow)
-2. [End-to-End Atomic Transaction Pipeline](#end-to-end-atomic-transaction-pipeline)
-3. [Localnet Testing with Cloned Mainnet Contracts](#localnet-testing-with-cloned-mainnet-contracts)
-   - [Cloned Account Fixtures](#cloned-account-fixtures)
-   - [Anchor.toml Configuration (`solana-test-validator`)](#anchortoml-configuration-solana-test-validator)
-   - [Running Localnet Tests via Bankrun](#running-localnet-tests-via-bankrun)
-4. [Program Implementation (Anchor Rust)](#program-implementation-anchor-rust)
-   - [`quote_direct_mm_rfq_arbitrage`: Pre-Execution Safety & Quoting](#1-quote_direct_mm_rfq_arbitrage)
-   - [`fill_direct_mm_rfq`: Direct Bilateral MM Settlement](#2-fill_direct_mm_rfq)
-   - [`settle_direct_mm_arbitrage`: Profit Enforcement & Rent Refund](#3-settle_direct_mm_arbitrage)
-5. [Client SDK & Transaction Builder](#client-sdk--transaction-builder)
-6. [Test Suite Execution & Results](#test-suite-execution--results)
-
----
-
-## Core Concepts & Architecture
-
-### Direct RFQ vs Aggregator Routing (No Jupiter RFQ)
-
-Standard retail swaps on Solana route through meta-aggregators like Jupiter Swap or Jupiter RFQ (`order_engine`). However, institutional arbitrage and direct OTC flow operate **directly with Market Makers (MMs)**:
-* **Zero Aggregator Fees**: Eliminates third-party protocol take-rates and extra routing hops.
-* **Bilateral Counterparty Execution**: Tokens are transferred directly between the Taker's token account and the Fixed Market Maker's token accounts.
-* **Guaranteed Zero Slippage**: The Market Maker signs a firm quote payload with exact input/output amounts and a strict expiration timestamp (`expire_at`).
-
-### The Fixed Market Maker (MM) Model
-
-Our program registers and enforces two fixed institutional Market Makers:
-* **Fixed MM 1 (`MM Alpha`)**: `AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9`
-  * Specialized in Leg 1: supplies Token B (SOL) in exchange for borrowed Token A (USDC).
-* **Fixed MM 2 (`MM Beta`)**: `9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu`
-  * Specialized in Leg 2: supplies Token A (USDC) in exchange for intermediate Token B (SOL).
-
----
-
-### Jupiter Lend Direct Flash Loan Constraint
-
-In Jupiter Lend's Flashloan Program (`jupgfSgfuAXv4B6R2Uxu85Z1qdzgju79s6MfZekN6XS`), the program strictly enforces:
-```rust
-// programs/flashloan/src/validate.rs
-if get_stack_height() > constants::FLASHLOAN_STACK_HEIGHT { // STACK_HEIGHT == 1
-    return Err(ErrorCodes::FlashloanCPICallNotAllowed.into());
-}
-```
-* **CPI is Forbidden**: Flash loans cannot be called from another contract via CPI. Both `flashloan_borrow` and `flashloan_payback` must be top-level instructions.
-* **Instruction Introspection**: `flashloan_borrow` reads Solana's `SysvarInstructions` and ensures a matching `flashloan_payback` instruction exists later in the transaction with identical accounts and amount.
-
----
-
-### On-Chain Pre-Quoting Before Flash Loan Borrow
-
-Before taking the flash loan, our program executes an **On-Chain Quote Instruction** (`quote_direct_mm_rfq_arbitrage`) at **Instruction 0**:
-1. Checks that the quoting counterparties match the authorized fixed MMs.
-2. Mathematically calculates round-trip return:
-   $$\text{Final Token A} = \text{Quote}_{\text{MM2}}.\text{output\_amount} + \text{unused}$$
-   $$\text{Loan Debt} = \text{Borrow Amount} + \text{Flash Loan Fee}$$
-   $$\text{Net Profit} = \text{Final Token A} - \text{Loan Debt}$$
-3. Asserts $\text{Net Profit} \ge \text{Min Profit Threshold}$.
-4. Verifies $Clock \le \text{expire\_at}$ for both quotes.
-5. Inspects `SysvarInstructions` to guarantee the flash loan pipeline order.
-6. **Reverts immediately** if unprofitable or expired, saving gas and preventing any loan from opening!
-
----
-
-## End-to-End Atomic Transaction Pipeline
+Two Anchor programs that answer one question: **can a flash loan be made to trade a token into
+another token and back, through direct bilateral RFQs with fixed market makers, where the whole
+trade is priced on chain before any capital is used?**
 
 ```
-+-----------------------------------------------------------------------------------------+
-|                        Atomic Solana Versioned Transaction (v0)                         |
-+-----------------------------------------------------------------------------------------+
-| [0] ComputeBudget::SetComputeUnitLimit(500,000)                                         |
-| [1] ComputeBudget::SetComputeUnitPrice(100,000 µLamports)                               |
-+-----------------------------------------------------------------------------------------+
-| [2] direct_mm_rfq_flashloan::quote_direct_mm_rfq_arbitrage                               |
-|     - Evaluates MM 1 and MM 2 quotes on-chain before borrowing funds                    |
-|     - Checks: Clock <= expire_at, Leg 2 In <= Leg 1 Out, Leg 1 In <= Borrow Amount    |
-|     - Asserts: Final USDC >= Borrowed USDC + Flash Loan Fee + Min Profit Threshold      |
-|     - Inspects SysvarInstructions: confirms borrow & payback exist                      |
-|     - Initializes transient ArbitrageSession PDA                                        |
-+-----------------------------------------------------------------------------------------+
-| [3] jupiter_lend::flashloan_borrow(100,000 USDC)                                        |
-|     - Direct top-level invocation (stack_height == 1)                                   |
-|     - Transfers 100,000 USDC into user's ATA                                            |
-+-----------------------------------------------------------------------------------------+
-| [4] direct_mm_rfq_flashloan::fill_direct_mm_rfq (Leg 1: Taker <-> Fixed MM 1)           |
-|     - Taker sends 100,000 USDC directly to MM 1                                         |
-|     - MM 1 delivers 500 SOL directly to Taker (@ $200.00/SOL)                           |
-+-----------------------------------------------------------------------------------------+
-| [5] direct_mm_rfq_flashloan::fill_direct_mm_rfq (Leg 2: Taker <-> Fixed MM 2)           |
-|     - Taker sends 500 SOL directly to MM 2                                              |
-|     - MM 2 delivers 100,300 USDC directly to Taker (@ $200.60/SOL)                      |
-|     - Realizes the arbitrage spread (+300 USDC)                                         |
-+-----------------------------------------------------------------------------------------+
-| [6] direct_mm_rfq_flashloan::settle_direct_mm_arbitrage                                 |
-|     - Verifies post-swap USDC ATA balance >= 100,000 USDC + min_profit                  |
-|     - Realizes net profit (+300 USDC)                                                   |
-|     - Closes transient ArbitrageSession PDA & refunds rent lamports to user             |
-+-----------------------------------------------------------------------------------------+
-| [7] jupiter_lend::flashloan_payback(100,000 USDC)                                       |
-|     - Repays 100,000 USDC back to Jupiter Lend Vault (0% fee)                           |
-|     - Atomic transaction completes successfully                                         |
-+-----------------------------------------------------------------------------------------+
+                 ┌────────────────────────── one atomic v0 transaction ──────────────────────────┐
+ taker  ───────► │ [0] ComputeBudget::SetComputeUnitLimit(500_000)                              │
+ (1 signer)      │ [1] ComputeBudget::SetComputeUnitPrice(100_000)                              │
+                 │ [2] jupiter_lend::flashloan_borrow(B)        ← top level (CPI is forbidden)   │
+                 │ [3] rfq::quote_arbitrage                     ← prices BOTH legs, on chain      │
+                 │ [4] rfq::fill_rfq_leg(1)  ──CPI──► mm::settle_quote  (B  → intermediate)      │
+                 │ [5] rfq::fill_rfq_leg(2)  ──CPI──► mm::settle_quote  (intermediate → B)       │
+                 │ [6] rfq::settle_arbitrage                    ← proves repayment + profit      │
+                 │ [7] jupiter_lend::flashloan_payback(B)       ← last instruction, closes loan   │
+                 └───────────────────────────────────────────────────────────────────────────────┘
+                        makers never sign this transaction - only their quotes, once
 ```
+
+* `programs/flashloan-rfq-arb` — RFQ lifecycle, the **on-chain pre-quote**, leg execution via CPI,
+  and post-trade settlement.
+* `programs/fixed-market-maker` — the RFQ venue: maker registry, **PDA-owned inventory vaults**,
+  firm signed quotes with expiry + designated taker, and settlement that needs only the taker's
+  signature.
 
 ---
 
-## Localnet Testing with Cloned Mainnet Contracts
+## 1. What is actually verified in this repository
 
-### Cloned Account Fixtures
+This environment has **no Rust toolchain** (no `cargo`, `solana`, `anchor`) and no Solana RPC, so
+the programs are **not compiled here**. Instead, `tests/` contains a verification harness that
+derives its entire view of the on-chain interface *from the Rust sources* and executes the full
+pipeline deterministically:
 
-Real mainnet contracts and accounts have been cloned into `fixtures/cloned_accounts/`:
-1. `jupgfSgfuAXv4B6R2Uxu85Z1qdzgju79s6MfZekN6XS.json`: Jupiter Lend Flashloan Program
-2. `ESoMWjdS6i8pMgc75SN4s1gNotRDtNLox4uCxk6udXqY.json`: Flashloan Executable BPF ProgramData
-3. `jupeiUmn818Jg1ekPURTpr4mFo29p46vygyykFJ3wZC.json`: Jupiter Lend Liquidity Program
-4. `J6Ry5yuy4Vp4kNa1PTGASiHJxZ8x4pgRPaJ18SmnqtW5.json`: Liquidity Executable BPF ProgramData
-5. `ALXWtv2P4GqH1B7Lq731joag52yRBRqmHV4naiXPTYWL.json`: Jupiter Lend Flashloan Admin PDA
-6. `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v.json`: USDC Mint
-7. `So11111111111111111111111111111111111111112.json`: WSOL Mint
-
-### Anchor.toml Configuration (`solana-test-validator`)
-
-When running with Anchor localnet:
-```toml
-[test.validator]
-url = "https://api.mainnet-beta.solana.com"
-
-[[test.validator.clone]]
-address = "jupgfSgfuAXv4B6R2Uxu85Z1qdzgju79s6MfZekN6XS"
-
-[[test.validator.clone]]
-address = "ESoMWjdS6i8pMgc75SN4s1gNotRDtNLox4uCxk6udXqY"
-
-[[test.validator.clone]]
-address = "jupeiUmn818Jg1ekPURTpr4mFo29p46vygyykFJ3wZC"
-
-[[test.validator.clone]]
-address = "J6Ry5yuy4Vp4kNa1PTGASiHJxZ8x4pgRPaJ18SmnqtW5"
-
-[[test.validator.clone]]
-address = "ALXWtv2P4GqH1B7Lq731joag52yRBRqmHV4naiXPTYWL"
-
-[[test.validator.clone]]
-address = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-
-[[test.validator.clone]]
-address = "So11111111111111111111111111111111111111112"
-```
-
----
-
-## Test Suite Execution & Results
-
-### Running All Tests
+| Verified offline | How |
+|---|---|
+| Anchor discriminator scheme (`global:` / `account:` / `event:`) | checked against the **official Jupiter Lend IDL** vendored in `fixtures/idl/flashloan.json` |
+| Every `#[account]` struct's `pub const LEN` | compared with its Borsh field sum parsed from `state.rs` |
+| `FlashloanAdmin` 93-byte layout used by `jupiter_lend.rs` | offsets parsed from the Rust and compared with the published struct |
+| Jupiter instruction account indices the RFQ program reads | compared with the IDL account order |
+| Every error variant name used by the handlers | checked against the Rust `#[error_code]` enums |
+| Real PDAs / associated token accounts / instruction encoding | `@solana/web3.js`, real seeds, real Borsh |
+| v0 transaction size | serialised with `@solana/web3.js` and measured against the 1232-byte limit |
+| 24 behavioural scenarios (profit, fees, expiry, replay, CPI, rollback…) | deterministic in-memory VM |
 
 ```bash
-npm run test:all
+npm install
+npm test          # encodings + scenarios + full report
 ```
 
-Outputs:
-1. `npm test`: Runs the full 4-case simulation test (profitable arbitrage, unprofitable quote rejection, expired quote rejection, security introspection).
-2. `npm run test:localnet`: Boots an in-process localnet Solana SVM using `solana-bankrun`, loads the cloned mainnet contracts and accounts, and executes the complete Flash Loan + Direct MM RFQ transaction.
+Individual suites:
+
+```bash
+npm run test:encodings   # interface/layout parity (67 checks)
+npm run test:vm          # 24 behavioural scenarios
+npm run test:report      # the study report (tables, balances, sizes, event trail)
+```
+
+**Not verified here — needs a toolchain and network:** `anchor build && anchor test`. The VM is a
+*specification model*: it transcribes the Rust handlers and enforces signer/writable/owner rules,
+PDAs, atomicity, the instructions sysvar and stack height — it is not a BPF interpreter and does
+not model compute units.
+
+---
+
+## 2. The design, and why it looks like this
+
+### 2.1 Makers must not co-sign the arbitrage transaction
+
+An atomic transaction cannot wait for an off-chain market maker to add a signature. The venue
+therefore splits "authorising a price" from "moving the tokens":
+
+1. **`post_quote`** (maker signs, once, ahead of time) writes a `Quote` account containing the
+   RFQ it answers, the **designated taker**, the two mints, exact input/output amounts, an expiry
+   **slot**, and a `filled` flag.
+2. **`settle_quote`** (taker signs) performs the two transfers:
+   * taker → maker vault, authorised by the **taker's** signature,
+   * maker vault → taker, authorised by the **`["mm_vault", maker, mint]` PDA** — the maker's
+     inventory sits in a token account whose authority is the program, so the program can deliver
+     without the maker being present.
+
+The maker's safety comes from the quote account, not from its signature at fill time: expiry,
+exact amounts, designated taker, one-shot `filled`, and a live inventory re-check.
+
+### 2.2 Quotes are accounts, not instruction arguments
+
+Passing a price as an instruction argument is only a claim. Pricing against **signed, expiring,
+owner-checked quote accounts** means `quote_arbitrage` reads state neither the taker nor a
+relayer can forge, and the MM program can refuse a second fill without trusting the taker.
+
+### 2.3 The on-chain pre-quote (`quote_arbitrage`)
+
+Runs before any swap and reverts the whole transaction if anything is off. It reads **only chain
+state**:
+
+| Input | Source |
+|---|---|
+| leg 1 / leg 2 price | `Quote` accounts owned by the MM program |
+| maker inventory | the makers' PDA-owned token accounts (live balances) |
+| flash loan fee + protocol status | Jupiter Lend's `FlashloanAdmin` account (93 bytes, layout pinned) |
+| expiry | `Clock` (slots) |
+| loan wiring | the instruction sysvar: exactly one borrow **before** us, exactly one payback **and it must be last** |
+
+Then it prices the round trip and requires `leg2_out ≥ borrow + fee + profit_floor`, where the fee
+is `ceil(borrow × fee_bps / 10_000)` with `fee_bps` taken from the on-chain admin account.
+
+### 2.4 Round-trip exactness
+
+* leg 1 input **must equal** the borrowed amount (no idle borrowed capital),
+* leg 2 input **must equal** leg 1 output (no stranded intermediate token),
+* leg 2 output mint **must be** the borrowed mint,
+* settlement re-checks that the intermediate balance returned to its pre-loan level
+  (`max_intermediate_dust` tolerance).
+
+### 2.5 Settlement measures deltas, not absolutes
+
+The pre-quote runs *after* the loan lands (Jupiter Lend's borrow must be top-level and its payback
+must exist later in the transaction), so the taker's token account already holds the principal.
+`quote_arbitrage` therefore stores `pre_loan_balance = balance − principal`, and settlement requires
+
+```
+balance ≥ pre_loan_balance + required_repayment + min_profit
+```
+
+A taker's pre-existing inventory can never be booked as trading profit.
+
+---
+
+## 3. Jupiter Lend compliancy
+
+Verified against the official IDL (`fixtures/idl/flashloan.json`, program v0.1.4, program id
+`jupgfSgfuAXv4B6R2Uxu85Z1qdzgju79s6MfZekN6XS`):
+
+| Fact | Value | Where it is used |
+|---|---|---|
+| `flashloan_borrow` discriminator | `67134e18f009873f` | `jupiter_lend.rs`, harness |
+| `flashloan_payback` discriminator | `d52f998954f35ee8` | `jupiter_lend.rs`, harness |
+| accounts per instruction | 14 | pipeline builder |
+| `FlashloanAdmin` size | 93 bytes | parsed (manual, offset-pinned) |
+| `FlashloanAdmin` fee field | offset 73, `u16` bps | priced into the arbitrage |
+| admin PDA | `["flashloan_admin"]` → `ALXWtv2P4GqH1B7Lq731joag52yRBRqmHV4naiXPTYWL` | derived, not hardcoded |
+| CPI into borrow | rejected: `FLASHLOAN_CPICALL_NOT_ALLOWED` (6012) | never CPId; modelled in the suite |
+| missing payback | `FLASHLOAN_PAYBACK_NOT_FOUND` (6009) | the RFQ program asserts the same structure itself |
+
+Nothing in this repo CPIs into Jupiter Lend. The two flashloan instructions are top-level and the
+RFQ instructions sit between them.
+
+---
+
+## 4. Repository layout
+
+```
+programs/
+  flashloan-rfq-arb/src/
+    lib.rs                 instruction entry points + pipeline documentation
+    state.rs               ArbConfig / RfqRequest / ArbSession (PDA seeds)
+    math.rs                pure round-trip pricing (ceil-div fee, exactness) + unit tests
+    jupiter_lend.rs        IDL-pinned adapter: admin layout, discriminators, sysvar introspection
+    instructions/
+      initialize_config.rs create_rfq.rs  quote_arbitrage.rs  fill_rfq_leg.rs  settle_arbitrage.rs
+  fixed-market-maker/src/
+    lib.rs  state.rs  errors.rs  events.rs
+    instructions/initialize_config.rs  maker.rs  quote.rs  settle_quote.rs
+tests/
+  lib/rustsrc.ts           parses programs/*/src (layouts, accounts, errors, events, seeds)
+  lib/anchor.ts            discriminators + Borsh codec
+  lib/vm.ts                deterministic execution model (signers, CPI, sysvar, atomicity)
+  lib/world.ts             fixtures: actors, mints, Jupiter admin, makers, quotes, pipeline
+  lib/jupiter.ts           Jupiter Lend model driven by the official IDL
+  lib/scenarios.ts         the 24-scenario matrix (shared with the report)
+  lib/pipeline.ts          real v0 assembly + packet-size measurement
+  programs/*.ts            transcriptions of the Rust handlers
+  run_encoding_checks.ts  run_vm_tests.ts  run_report.ts
+fixtures/idl/flashloan.json official Jupiter Lend IDL (vendored, with attribution)
+```
+
+---
+
+## 5. Running against real BPF
+
+```bash
+anchor build            # both programs
+anchor test             # requires the Jupiter Lend accounts (see Anchor.toml)
+```
+
+`Anchor.toml` lists the mainnet accounts to clone for a forked validator. `flashloan_borrow` also
+needs the liquidity-layer reserve / borrow-position / rate-model accounts, whose seeds are not in
+the published IDL — copy them from a live mainnet borrow transaction. The harness uses documented
+stand-ins for exactly those four accounts, and real values for everything else.
+
+---
+
+## 6. Known limitations / next steps
+
+* **Not compiled here.** Expect to fix small things on first `anchor build` (imports, a bump).
+* **ALT is mandatory.** 8 instructions / 35 accounts measure **1417 bytes** raw; **490 bytes** with
+  a lookup table. Both numbers are measured, not estimated (`npm run test:report`).
+* **Fee semantics are modelled** as `ceil(amount × bps / 10_000)` charged at payback. Jupiter Lend
+  currently charges 0 bps, so the term is normally zero; the code prices it anyway and caps it with
+  `max_flashloan_fee_bps`.
+* **Single signer.** The taker signs everything; production would separate a fee-payer/keypair
+  policy and consider a Jito bundle for landing.
+* **Quote sniping** is prevented by `designated_taker` on the quote, not by an allowlist.
+* Ideas worth exploring next: multi-maker competition on one RFQ (n quotes, pick the best in the
+  pre-quote), partial fills, and a proptest fuzz of `evaluate_round_trip` around rounding edges.
+
+## 7. License
+
+Apache-2.0.

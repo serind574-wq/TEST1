@@ -1,35 +1,31 @@
 {
   "name": "solana-jupiter-rfq-flashloan",
   "version": "1.0.0",
-  "description": "Solana Program and Client for Jupiter Lend Flash Loans with Direct Fixed-MM RFQ Arbitrage",
-  "main": "client/index.ts",
+  "description": "Anchor programs and verification harness for Jupiter Lend flash-loan funded, on-chain-quoted direct-RFQ arbitrage",
+  "main": "tests/lib/pipeline.ts",
   "scripts": {
-    "test": "npx ts-node tests/run_simulation.ts",
-    "test:localnet": "npx ts-node tests/localnet_cloned_runner.ts",
-    "test:all": "npx ts-node tests/run_simulation.ts && npx ts-node tests/localnet_cloned_runner.ts"
+    "test": "npm run test:encodings && npm run test:vm && npm run test:report",
+    "test:encodings": "ts-node tests/run_encoding_checks.ts",
+    "test:vm": "ts-node tests/run_vm_tests.ts",
+    "test:report": "ts-node tests/run_report.ts",
+    "typecheck": "tsc --noEmit"
   },
   "keywords": [
     "solana",
     "anchor",
-    "jupiter",
+    "jupiter-lend",
     "flashloan",
     "rfq",
     "arbitrage",
-    "market-maker",
-    "localnet"
+    "market-maker"
   ],
-  "author": "",
   "license": "Apache-2.0",
   "dependencies": {
-    "@coral-xyz/anchor": "^0.30.1",
     "@solana/spl-token": "^0.4.15",
-    "@solana/web3.js": "^1.98.0",
-    "bn.js": "^5.2.1"
+    "@solana/web3.js": "^1.98.0"
   },
   "devDependencies": {
-    "@types/bn.js": "^5.1.6",
     "@types/node": "^22.10.1",
-    "solana-bankrun": "^0.2.1",
     "ts-node": "^10.9.2",
     "typescript": "^5.7.2"
   }

@@ -1,0 +1,50 @@
+[toolchain]
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+direct_mm_rfq_flashloan = "GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB"
+fixed_market_maker = "J2xccRtuG43drESLYznHhLhQkLTdfepcKYbiQ9BsJVaf"
+
+[programs.mainnet]
+direct_mm_rfq_flashloan = "GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB"
+fixed_market_maker = "J2xccRtuG43drESLYznHhLhQkLTdfepcKYbiQ9BsJVaf"
+jupiter_lend_flashloan = "jupgfSgfuAXv4B6R2Uxu85Z1qdzgju79s6MfZekN6XS"
+jupiter_lend_liquidity = "jupeiUmn818Jg1ekPURTpr4mFo29p46vygyykFJ3wZC"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "Localnet"
+wallet = "~/.config/solana/id.json"
+
+[test.validator]
+url = "https://api.mainnet-beta.solana.com"
+
+# Cloned mainnet contracts and accounts for localnet testing
+[[test.validator.clone]]
+address = "jupgfSgfuAXv4B6R2Uxu85Z1qdzgju79s6MfZekN6XS" # Jupiter Lend Flashloan Program
+
+[[test.validator.clone]]
+address = "ESoMWjdS6i8pMgc75SN4s1gNotRDtNLox4uCxk6udXqY" # Flashloan ProgramData (Executable Bytecode)
+
+[[test.validator.clone]]
+address = "jupeiUmn818Jg1ekPURTpr4mFo29p46vygyykFJ3wZC" # Jupiter Lend Liquidity Program
+
+[[test.validator.clone]]
+address = "J6Ry5yuy4Vp4kNa1PTGASiHJxZ8x4pgRPaJ18SmnqtW5" # Liquidity ProgramData (Executable Bytecode)
+
+[[test.validator.clone]]
+address = "ALXWtv2P4GqH1B7Lq731joag52yRBRqmHV4naiXPTYWL" # Flashloan Admin PDA
+
+[[test.validator.clone]]
+address = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" # USDC Mint
+
+[[test.validator.clone]]
+address = "So11111111111111111111111111111111111111112"  # WSOL Mint
+
+[scripts]
+test = "npm run test:all"

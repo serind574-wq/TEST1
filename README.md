@@ -49,6 +49,10 @@ npm install
 npm test          # encodings + scenarios + full report
 ```
 
+**New here? Start with [`docs/RUN_LOCALLY.md`](docs/RUN_LOCALLY.md)** — it walks through both the
+offline harness (Node only, ~1 minute) and building/deploying the real programs on a local
+validator, with a troubleshooting table.
+
 Individual suites:
 
 ```bash

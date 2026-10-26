@@ -1,0 +1,21 @@
+[package]
+name = "fixed-market-maker"
+version = "0.1.0"
+description = "Fixed market maker RFQ venue: signed firm quotes, PDA-owned inventory vaults, signature-free settlement"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "fixed_market_maker"
+
+[features]
+default = []
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+
+[dependencies]
+anchor-lang = { version = "0.31.1", features = ["init-if-needed"] }
+anchor-spl = { version = "0.31.1", features = ["token"] }

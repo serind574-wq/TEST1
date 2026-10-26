@@ -1,0 +1,22 @@
+[package]
+name = "flashloan-rfq-arb"
+version = "0.1.0"
+description = "Jupiter Lend flash-loan funded, on-chain-quoted direct RFQ round-trip arbitrage"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "flashloan_rfq_arb"
+
+[features]
+default = []
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build", "fixed-market-maker/idl-build"]
+
+[dependencies]
+anchor-lang = "0.31.1"
+anchor-spl = { version = "0.31.1", features = ["token"] }
+fixed-market-maker = { path = "../fixed-market-maker", features = ["cpi"] }

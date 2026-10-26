@@ -125,13 +125,35 @@ avm use 0.31.1
 solana --version && anchor --version    # expect anchor-cli 0.31.1
 ```
 
-If `anchor build` complains about the Rust toolchain, pin one explicitly:
+Do **not** pin Rust 1.79.0 (earlier revisions of this guide said to - that advice was wrong, see
+[`edition2024`](#edition2024-is-required)). Use Rust **1.85 or newer**, and check what your SBF
+toolchain can do before you start:
 
 ```bash
-rustup toolchain install 1.79.0
-# then in Anchor.toml, under [toolchain]:
-# channel = "1.79.0"
+./scripts/toolchain-check.sh
 ```
+
+That prints your host Rust, the Rust bundled in Solana's *platform-tools* (which is what
+`anchor build` actually compiles with), any crate in the resolved graph that demands edition 2024,
+and whether a `Cargo.lock` exists.
+
+The two toolchains are independent — this trips everybody up:
+
+| Command | Compiler used | Fixed by |
+|---|---|---|
+| `anchor build` / `cargo build-sbf` | Rust bundled in Solana **platform-tools** | upgrading the Solana CLI |
+| `cargo test`, `cargo metadata` | your **rustup** toolchain | `rustup default stable` |
+
+Required minimums (edition 2024 was stabilized in **Rust 1.85**):
+
+| platform-tools | bundled Rust | edition 2024 |
+|---|---|---|
+| v1.43 – v1.46 | 1.79.0 | ❌ |
+| v1.47 – v1.51.1 | 1.84.1 | ❌ |
+| **v1.52+** | **1.89.0** | ✅ |
+
+(From the [platform-tools release notes](https://github.com/anza-xyz/platform-tools/releases); each
+tag pins a `solana-tools-v*` tag in `anza-xyz/rust`.)
 
 ### B2. Wallet setup
 
@@ -273,7 +295,8 @@ Anchor's generated client.
 | `No matching version found for solana-bankrun` | Old lockfile from a previous revision. The current `package.json` has no `solana-bankrun`; run `git pull` and `npm install`. |
 | `cannot find module 'ts-node'` / weird `_npx` paths | `node_modules` is missing or half-installed. Run `npm install` in the repo root. **Do not run `npm ci --dry-run`** — npm still clears `node_modules`. |
 | `anchor: command not found` | `export PATH="$HOME/.avm/bin:$PATH"` (avm installs into `~/.avm/bin`). |
-| `anchor build` fails on the toolchain | `rustup toolchain install 1.79.0` and add `channel = "1.79.0"` under `[toolchain]` in `Anchor.toml`. |
+| `anchor build` fails on the toolchain | Run `./scripts/toolchain-check.sh`. Host builds need Rust >= 1.85 (`rustup default stable`); SBF builds need platform-tools >= v1.52 (upgrade the Solana CLI). **Do not** pin 1.79.0. |
+| `feature \`edition2024\` is required` | See [below](#edition2024-is-required). |
 | `Error: No such file or directory` for the wallet | Create `~/.config/solana/id.json` (`solana-keygen new`); `Anchor.toml` hard-codes that path. |
 | `anchor test` runs TypeScript instead of BPF | Expected: `[scripts] test = "npm test"` in `Anchor.toml`. See B4. |
 | `AccountNotFound` / `InvalidAccountData` at `flashloan_borrow` | The four liquidity-layer accounts are not the cloned mainnet ones. See B5. |
@@ -283,6 +306,94 @@ Anchor's generated client.
 | Port 8899 already in use | An old validator is running: `pkill -f solana-test-validator`, or use `--ledger .anchor/ledger2`. |
 
 ---
+
+## `edition2024` is required
+
+You hit this:
+
+```text
+Caused by:
+  feature `edition2024` is required
+  The package requires the Cargo feature called `edition2024`, but that feature is not stabilized
+  in this version of Cargo (1.79.0 (8d3d6ef09 2024-08-15)).
+```
+
+### What is actually wrong
+
+Nothing in this repository is broken. Some **transitive dependency** was published with
+`edition = "2024"` in its `Cargo.toml`, and edition 2024 was stabilized in **Rust 1.85**. Your
+Cargo is `1.79.0`, so it refuses to parse that crate.
+
+Two details explain why this appears out of nowhere:
+
+1. **`anchor build` does not use your Rust.** It shells out to `cargo build-sbf`, which uses the
+   compiler baked into Solana's *platform-tools*. Solana CLIs shipping platform-tools
+   v1.43 – v1.51.1 bundle Rust 1.79 / 1.84 — both older than 1.85. `rustup update` cannot help;
+   only `platform-tools >= v1.52` (Rust 1.89) can.
+2. **This repo has no committed `Cargo.lock`.** Every build re-resolves `anchor-lang 0.31.1`'s
+   dependency ranges and happily picks up the newest patch releases, so a crate that adopted
+   edition 2024 lands in the graph without anything here changing.
+
+Run the diagnostic first — it names the offenders and your toolchain versions:
+
+```bash
+./scripts/toolchain-check.sh
+```
+
+### Fix A — upgrade the Solana CLI (do this if you want the modern stack)
+
+```bash
+sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"   # installs the current Agave release
+export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+
+# clear any stale downloaded SBF toolchain, then verify
+rm -rf ~/.cache/solana
+cargo-build-sbf --version        # want: platform-tools v1.52 or newer
+./scripts/toolchain-check.sh
+```
+
+If the very new toolchain then trips Anchor 0.31.1 (it is a 2025-vintage release), prefer Fix B.
+
+### Fix B — pin the offending crates (surgical, keeps your current CLI)
+
+```bash
+# 1. what demands edition 2024?
+cargo metadata --format-version 1 \
+  | python3 -c "import json,sys; [print(p['name'], p['version']) for p in json.load(sys.stdin)['packages'] if p.get('edition')=='2024']"
+
+# 2. pin each one back to a release that predates the edition bump, e.g.
+cargo update -p <crate-name> --precise <older-version>
+
+# 3. lock it in and commit - without this, the next build re-resolves again
+cargo generate-lockfile
+git add Cargo.lock && git commit -m "chore: pin dependencies for Rust 1.79 platform-tools"
+```
+
+`cargo update -p X --precise Y` needs a concrete `Y`: use `cargo tree -i X` to see why `X` is
+present, then check its release history for the last edition-2021 release. Commit the lockfile —
+that single file is what stops the problem recurring.
+
+> **Lockfile format gotcha.** Cargo ≥ 1.83 writes `Cargo.lock` **version 4**, and Cargo 1.79 (what
+> old platform-tools bundles) refuses to read it:
+> `lock file version 4 requires -Z next-lockfile-bump`.
+> If you stay on the old toolchain, either generate the lock with that cargo
+> (`~/.cache/solana/*/platform-tools/rust/bin/cargo generate-lockfile`), or edit
+> `version = 4` → `version = 3` at the top of `Cargo.lock` — v3 is readable by both old and new
+> Cargo.
+
+### Fix C — host-side builds only (`cargo test`, `cargo metadata`)
+
+```bash
+rustup toolchain install stable && rustup default stable   # Rust >= 1.85
+```
+
+This fixes `cargo test` but **will not fix `anchor build`**, because that uses platform-tools.
+
+### What not to do
+
+Do **not** pin `channel = "1.79.0"` under `[toolchain]` in `Anchor.toml` (earlier revisions of this
+guide suggested it — that was my mistake and it causes exactly this failure). If you already added
+it, delete the line.
 
 ## Where to read next
 
@@ -295,3 +406,4 @@ Anchor's generated client.
 | `programs/flashloan-rfq-arb/src/jupiter_lend.rs` | the IDL-pinned Jupiter adapter and sysvar introspection |
 | `tests/lib/scenarios.ts` | the behavioural contract, in one readable file |
 | `tests/run_report.ts` | everything measured, printed |
+| `scripts/toolchain-check.sh` | diagnoses this class of build failure: host Rust, platform-tools Rust, edition-2024 crates, lockfile |

@@ -53,6 +53,13 @@ npm test          # encodings + scenarios + full report
 offline harness (Node only, ~1 minute) and building/deploying the real programs on a local
 validator, with a troubleshooting table.
 
+Building locally and hitting `feature \`edition2024\` is required`? Run
+`./scripts/toolchain-check.sh`, then see
+[`docs/RUN_LOCALLY.md` § edition2024](docs/RUN_LOCALLY.md#edition2024-is-required). In short:
+`anchor build` compiles with the Rust bundled in Solana **platform-tools** (needs ≥ v1.52 for Rust
+1.85+), not your rustup toolchain — and this repo ships no `Cargo.lock`, so pin the offending
+crates or upgrade the CLI.
+
 Individual suites:
 
 ```bash

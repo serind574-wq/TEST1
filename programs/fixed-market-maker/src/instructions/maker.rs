@@ -48,7 +48,7 @@ pub struct InitVault<'info> {
     #[account(
         seeds = [MAKER_SEED, maker.key().as_ref()],
         bump = maker_account.bump,
-        has_one = maker @ MmError::Unauthorized
+        constraint = maker_account.authority == maker.key() @ MmError::Unauthorized
     )]
     pub maker_account: Account<'info, MakerAccount>,
 
@@ -93,7 +93,7 @@ pub struct DepositInventory<'info> {
     #[account(
         seeds = [MAKER_SEED, maker.key().as_ref()],
         bump = maker_account.bump,
-        has_one = maker @ MmError::Unauthorized
+        constraint = maker_account.authority == maker.key() @ MmError::Unauthorized
     )]
     pub maker_account: Account<'info, MakerAccount>,
 
@@ -164,7 +164,7 @@ pub struct WithdrawInventory<'info> {
     #[account(
         seeds = [MAKER_SEED, maker.key().as_ref()],
         bump = maker_account.bump,
-        has_one = maker @ MmError::Unauthorized
+        constraint = maker_account.authority == maker.key() @ MmError::Unauthorized
     )]
     pub maker_account: Account<'info, MakerAccount>,
 

@@ -26,7 +26,7 @@ pub mod events;
 pub mod instructions;
 pub mod state;
 
-use instructions::*;
+pub use instructions::*;
 
 declare_id!("J2xccRtuG43drESLYznHhLhQkLTdfepcKYbiQ9BsJVaf");
 
